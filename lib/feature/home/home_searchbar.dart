@@ -40,7 +40,6 @@ class _HomeSearchBarState extends State<HomeSearchBar> {
     });
 
     FocusScope.of(context).unfocus();
-
     widget.onPlaceSelected(place);
   }
 
@@ -72,13 +71,12 @@ class _HomeSearchBarState extends State<HomeSearchBar> {
             controller: searchController,
             onChanged: searchPlaces,
             decoration: const InputDecoration(
-              hintText: 'Search Place',
+              hintText: 'Search for a place',
               prefixIcon: Icon(Icons.search),
               border: InputBorder.none,
             ),
           ),
         ),
-
         if (showResults)
           Container(
             margin: const EdgeInsets.only(top: 5),
@@ -89,11 +87,15 @@ class _HomeSearchBarState extends State<HomeSearchBar> {
             child: searchResults.isEmpty
                 ? const Padding(
                     padding: EdgeInsets.all(15),
-                    child: Text('No places found'),
+                    child: Text(
+                      'No places found',
+                      textAlign: TextAlign.center,
+                    ),
                   )
                 : ListView.separated(
                     shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
+                    physics:
+                        const NeverScrollableScrollPhysics(),
                     itemCount: searchResults.length,
                     separatorBuilder: (_, __) =>
                         const Divider(height: 1),
@@ -105,6 +107,7 @@ class _HomeSearchBarState extends State<HomeSearchBar> {
                           Icons.location_on_outlined,
                         ),
                         title: Text(place.name),
+                        subtitle: Text(place.address),
                         onTap: () => selectPlace(place),
                       );
                     },

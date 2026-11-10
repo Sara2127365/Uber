@@ -113,6 +113,7 @@ class _HomeScreenState extends State<HomeScreen> {
       locationPermissionGranted = true;
 
       updateMarkers();
+
       setState(() {
         currentLocationName = 'Getting address...';
       });
@@ -157,7 +158,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-
         final address = data['address'];
 
         if (address is Map) {
@@ -232,7 +232,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Get destination address
+  // Get destination address from coordinates
   Future<void> updateDestinationAddress() async {
     final requestedLocation = destinationLocation;
 
@@ -345,24 +345,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Select destination from search
   void onPlaceSelected(PlaceModel place) {
-    destinationLocation = LatLng(
-      place.latitude,
-      place.longitude,
-    );
+    setState(() {
+      destinationLocation = LatLng(
+        place.latitude,
+        place.longitude,
+      );
 
-    destinationName = place.name;
-    destinationAddress = '';
+      destinationName = place.name;
+      destinationAddress = place.address;
 
-    routeDistanceMeters = null;
-    routeDurationSeconds = null;
+      routeDistanceMeters = null;
+      routeDurationSeconds = null;
 
-    lastRouteDestination = null;
+      lastRouteDestination = null;
 
-    updateMarkers();
+      updateMarkers();
+    });
 
-    setState(() {});
-
-    updateDestinationAddress();
     fitMapToLocations();
 
     if (isRouteRequestRunning) {
@@ -484,7 +483,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (response.statusCode != 200) {
         debugPrint('OSRM RESPONSE: ${response.body}');
-        throw Exception('OSRM HTTP Error: ${response.statusCode}');
+        throw Exception(
+          'OSRM HTTP Error: ${response.statusCode}',
+        );
       }
 
       final data = jsonDecode(response.body);

@@ -1,7 +1,9 @@
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
@@ -9,6 +11,7 @@ import 'package:http/http.dart' as http;
 import 'package:obar/core/style/color_manager.dart';
 import 'package:obar/core/widgets/app_custom_bar.dart';
 import 'package:obar/feature/home/home_searchbar.dart';
+import 'package:obar/feature/home/model/place_model.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -18,24 +21,36 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  // Controllers
   GoogleMapController? mapController;
+  StreamSubscription<Position>? positionStreamSubscription;
 
+  // Location
+  LatLng? currentLocation;
+  LatLng? lastRouteLocation;
+
+  final LatLng defaultLocation =
+      const LatLng(30.0444, 31.2357);
+
+  LatLng destinationLocation =
+      const LatLng(30.0131, 31.2089);
+
+  String destinationName = 'Destination';
+
+  // Route tracking
+  LatLng? lastRouteDestination;
+
+  // API Key
+  String get googleApiKey =>
+      dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '';
+
+  // States
   bool locationPermissionGranted = false;
   bool isLoadingLocation = false;
   bool isLoadingRoute = false;
+  bool isRouteRequestRunning = false;
 
-  // Replace with your Google Directions API key.
-  static const String googleApiKey = 'YOUR_GOOGLE_API_KEY';
-
-  final LatLng defaultLocation = const LatLng(30.0444, 31.2357);
-
-  final LatLng destinationLocation = const LatLng(
-    30.0131,
-    31.2089,
-  );
-
-  LatLng? currentLocation;
-
+  // Map Elements
   Set<Marker> markers = {};
   Set<Polyline> polylines = {};
 
@@ -96,17 +111,15 @@ class _HomeScreenState extends State<HomeScreen> {
         locationPermissionGranted = true;
       });
 
-      // Move camera to current location
-      mapController?.animateCamera(
-        CameraUpdate.newLatLngZoom(currentLocation!, 16),
-      );
-
-      // Update markers
       updateMarkers();
 
-      // Get actual driving route
+      fitMapToLocations();
+
       await getRoute();
 
+      if (!mounted) return;
+
+      await startLiveLocation();
     } catch (e) {
       debugPrint('LOCATION ERROR: $e');
       showMessage('Unable to get current location.');
@@ -119,104 +132,301 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // 2. Update Markers
+  // 2. Start Live Location Tracking
+  Future<void> startLiveLocation() async {
+    await positionStreamSubscription?.cancel();
+
+    const LocationSettings settings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 10,
+    );
+
+    positionStreamSubscription =
+        Geolocator.getPositionStream(
+      locationSettings: settings,
+    ).listen(
+      (Position position) {
+        if (!mounted) return;
+
+        final newLocation = LatLng(
+          position.latitude,
+          position.longitude,
+        );
+
+        setState(() {
+          currentLocation = newLocation;
+        });
+
+        updateMarkers();
+
+        // Follow user location
+        mapController?.animateCamera(
+          CameraUpdate.newLatLng(newLocation),
+        );
+
+        updateRouteIfNeeded();
+      },
+      onError: (error) {
+        debugPrint('LIVE LOCATION ERROR: $error');
+      },
+    );
+  }
+
+  // 3. Select Destination From Search
+  void onPlaceSelected(PlaceModel place) {
+    final destination = LatLng(
+      place.latitude,
+      place.longitude,
+    );
+
+    setState(() {
+      destinationLocation = destination;
+      destinationName = place.name;
+
+      polylines = {};
+      lastRouteLocation = null;
+      lastRouteDestination = null;
+    });
+
+    updateMarkers();
+
+    fitMapToLocations();
+
+    if (currentLocation != null) {
+      getRoute();
+    }
+  }
+
+  // 4. Update Markers
   void updateMarkers() {
-    if (currentLocation == null) return;
+    if (!mounted) return;
 
     setState(() {
       markers = {
-        Marker(
-          markerId: const MarkerId('pickup'),
-          position: currentLocation!,
-          infoWindow: const InfoWindow(
-            title: 'Your Current Location',
+        if (currentLocation != null)
+          Marker(
+            markerId: const MarkerId('pickup'),
+            position: currentLocation!,
+            infoWindow: const InfoWindow(
+              title: 'Your Current Location',
+            ),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueGreen,
+            ),
           ),
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-            BitmapDescriptor.hueGreen,
-          ),
-        ),
+
         Marker(
           markerId: const MarkerId('destination'),
           position: destinationLocation,
-          infoWindow: const InfoWindow(
-            title: 'Destination',
+          infoWindow: InfoWindow(
+            title: destinationName,
           ),
         ),
       };
     });
   }
 
-  // 3. Get Actual Route using Directions API
-  Future<void> getRoute() async {
-    if (currentLocation == null) return;
+  // 5. Fit Current Location And Destination
+  void fitMapToLocations() {
+    if (currentLocation == null || mapController == null) {
+      return;
+    }
 
+    final south = currentLocation!.latitude <
+            destinationLocation.latitude
+        ? currentLocation!.latitude
+        : destinationLocation.latitude;
+
+    final north = currentLocation!.latitude >
+            destinationLocation.latitude
+        ? currentLocation!.latitude
+        : destinationLocation.latitude;
+
+    final west = currentLocation!.longitude <
+            destinationLocation.longitude
+        ? currentLocation!.longitude
+        : destinationLocation.longitude;
+
+    final east = currentLocation!.longitude >
+            destinationLocation.longitude
+        ? currentLocation!.longitude
+        : destinationLocation.longitude;
+
+    // Avoid invalid bounds when both locations are identical
+    if (south == north && west == east) {
+      mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(destinationLocation, 16),
+      );
+      return;
+    }
+
+    final bounds = LatLngBounds(
+      southwest: LatLng(south, west),
+      northeast: LatLng(north, east),
+    );
+
+    mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(bounds, 80),
+    );
+  }
+
+  // 6. Check Distance Before Updating Route
+  void updateRouteIfNeeded() {
+    if (currentLocation == null ||
+        isRouteRequestRunning) {
+      return;
+    }
+
+    final destinationChanged =
+        lastRouteDestination != destinationLocation;
+
+    if (destinationChanged) {
+      getRoute();
+      return;
+    }
+
+    if (lastRouteLocation != null) {
+      final distance = Geolocator.distanceBetween(
+        lastRouteLocation!.latitude,
+        lastRouteLocation!.longitude,
+        currentLocation!.latitude,
+        currentLocation!.longitude,
+      );
+
+      // Update route after moving 20 meters
+      if (distance < 20) return;
+    }
+
+    getRoute();
+  }
+
+  // 7. Get Actual Driving Route
+  
+Future<void> getRoute() async {
+  if (currentLocation == null || isRouteRequestRunning) {
+    return;
+  }
+
+  if (googleApiKey.isEmpty) {
+    showMessage('Google Maps API key is missing.');
+    return;
+  }
+
+  isRouteRequestRunning = true;
+
+  final routeOrigin = currentLocation!;
+  final routeDestination = destinationLocation;
+
+  bool requestSucceeded = false;
+
+  if (mounted) {
     setState(() {
       isLoadingRoute = true;
     });
+  }
 
-    try {
-      final origin =
-          '${currentLocation!.latitude},${currentLocation!.longitude}';
+  try {
+    final url = Uri.https(
+      'maps.googleapis.com',
+      '/maps/api/directions/json',
+      {
+        'origin':
+            '${routeOrigin.latitude},${routeOrigin.longitude}',
+        'destination':
+            '${routeDestination.latitude},${routeDestination.longitude}',
+        'mode': 'driving',
+        'key': googleApiKey,
+      },
+    );
 
-      final destination =
-          '${destinationLocation.latitude},${destinationLocation.longitude}';
+    final response = await http.get(url);
 
-      final url = Uri.parse(
-        'https://maps.googleapis.com/maps/api/directions/json'
-        '?origin=$origin'
-        '&destination=$destination'
-        '&mode=driving'
-        '&key=$googleApiKey',
+    debugPrint('DIRECTIONS HTTP CODE: ${response.statusCode}');
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'HTTP Error: ${response.statusCode} - ${response.body}',
       );
+    }
 
-      final response = await http.get(url);
+    final data = jsonDecode(response.body);
 
-      if (response.statusCode != 200) {
-        throw Exception('Directions request failed');
-      }
+    debugPrint('DIRECTIONS STATUS: ${data['status']}');
 
-      final data = jsonDecode(response.body);
+    if (data['status'] != 'OK') {
+      throw Exception(
+        'Google Directions Error: ${data['status']} '
+        '${data['error_message'] ?? ''}',
+      );
+    }
 
-      if (data['status'] != 'OK') {
-        throw Exception(
-          'Directions API: ${data['status']} '
-          '${data['error_message'] ?? ''}',
-        );
-      }
+    final routes = data['routes'] as List;
 
-      final encodedPoints =
-          data['routes'][0]['overview_polyline']['points'] as String;
+    if (routes.isEmpty) {
+      throw Exception('No driving route found.');
+    }
 
-      final routePoints = decodePolyline(encodedPoints);
+    final encodedPoints =
+        routes.first['overview_polyline']['points'] as String;
 
-      if (!mounted) return;
+    final routePoints = decodePolyline(encodedPoints);
 
+    if (!mounted) return;
+
+    // Do not display a route for an old destination
+    if (routeDestination != destinationLocation) {
+      return;
+    }
+
+    setState(() {
+      polylines = {
+        Polyline(
+          polylineId: const PolylineId('driving_route'),
+          points: routePoints,
+          color: Colors.blue,
+          width: 7,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          geodesic: false,
+        ),
+      };
+    });
+
+    lastRouteLocation = routeOrigin;
+    lastRouteDestination = routeDestination;
+
+    requestSucceeded = true;
+
+    debugPrint('DRIVING ROUTE DRAWN: ${routePoints.length} points');
+
+  } catch (e) {
+    debugPrint('ROUTE ERROR: $e');
+
+    if (mounted) {
+      showMessage('Unable to get driving route. Check API settings.');
+    }
+  } finally {
+    isRouteRequestRunning = false;
+
+    if (mounted) {
       setState(() {
-        polylines = {
-          Polyline(
-            polylineId: const PolylineId('actual_route'),
-            points: routePoints,
-            color: Colors.blue,
-            width: 6,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-          ),
-        };
+        isLoadingRoute = false;
       });
 
-    } catch (e) {
-      debugPrint('ROUTE ERROR: $e');
-      showMessage('Unable to get actual route.');
-    } finally {
-      if (mounted) {
-        setState(() {
-          isLoadingRoute = false;
-        });
+      // If destination changed while request was running,
+      // request the route for the new destination.
+      if (routeDestination != destinationLocation) {
+        getRoute();
+      } else if (requestSucceeded) {
+        // Recalculate only if the user moved during the request.
+        updateRouteIfNeeded();
       }
     }
   }
+}
 
-  // 4. Decode Google Encoded Polyline
+
+  // 8. Decode Google Encoded Polyline
   List<LatLng> decodePolyline(String encoded) {
     final List<LatLng> points = [];
 
@@ -267,6 +477,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return points;
   }
 
+  // 9. Show Message
   void showMessage(String message) {
     if (!mounted) return;
 
@@ -276,47 +487,60 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   @override
+  void dispose() {
+    positionStreamSubscription?.cancel();
+    mapController?.dispose();
+    super.dispose();
+  }
+
+  // 10. Build UI
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: ColorManager.backgroundColor,
+
       appBar: AppCustomBar(
         title: 'Obar',
         showBackButton: false,
         action: const Icon(Icons.car_crash),
       ),
+
       body: Stack(
         children: [
+          // Google Map
           GoogleMap(
             initialCameraPosition: CameraPosition(
               target: defaultLocation,
               zoom: 14,
             ),
+
             onMapCreated: (controller) {
               mapController = controller;
 
               if (currentLocation != null) {
-                controller.animateCamera(
-                  CameraUpdate.newLatLngZoom(
-                    currentLocation!,
-                    16,
-                  ),
-                );
+                fitMapToLocations();
               }
             },
+
             myLocationEnabled: locationPermissionGranted,
             myLocationButtonEnabled: false,
             zoomControlsEnabled: false,
+
             markers: markers,
             polylines: polylines,
           ),
 
+          // Search Bar
           Positioned(
             top: 16,
             left: 16,
             right: 16,
-            child: const HomeSearchBar(),
+            child: HomeSearchBar(
+              onPlaceSelected: onPlaceSelected,
+            ),
           ),
 
+          // Current Location Button
           Positioned(
             right: 16,
             bottom: 240,
@@ -326,8 +550,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   ? null
                   : getCurrentLocation,
               child: isLoadingLocation
-                  ? const CircularProgressIndicator(
-                      strokeWidth: 2,
+                  ? const SizedBox(
+                      height: 22,
+                      width: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                      ),
                     )
                   : const Icon(
                       Icons.my_location,
@@ -336,6 +564,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
 
+          // Pickup Bottom Sheet
           Positioned(
             left: 0,
             right: 0,
@@ -348,6 +577,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   top: Radius.circular(24),
                 ),
               ),
+
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -381,7 +611,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         Icons.my_location,
                         color: Colors.green,
                       ),
+
                       const SizedBox(width: 12),
+
                       Expanded(
                         child: Text(
                           currentLocation == null
@@ -395,20 +627,49 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
 
+                  const SizedBox(height: 12),
+
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.location_on,
+                        color: Colors.red,
+                      ),
+
+                      const SizedBox(width: 12),
+
+                      Expanded(
+                        child: Text(
+                          destinationName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+
                   const SizedBox(height: 20),
 
                   SizedBox(
                     width: double.infinity,
                     height: 50,
+
                     child: ElevatedButton(
                       onPressed: currentLocation == null ||
                               isLoadingRoute
                           ? null
-                          : () {},
+                          : () {
+                              showMessage(
+                                'Pickup and destination selected.',
+                              );
+                            },
+
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.black,
                         foregroundColor: Colors.white,
                       ),
+
                       child: Text(
                         isLoadingRoute
                             ? 'Getting route...'
